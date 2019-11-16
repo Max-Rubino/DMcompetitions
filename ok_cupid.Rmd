@@ -1,0 +1,668 @@
+---
+title: "DM competitions"
+output: html_document
+---
+
+TEAM NAME: #saygini
+
+TEAM MEMBERS: Alessandro Cavicchi, Marco Musto, Massimiliano Rubino
+
+## Online dating
+
+L'obiettivo della competizione ?? prevedere se la professione di una persona fosse STEM o no. Il training set include 6000 individui, dove 1095 sono STEM.Questo implica uno sbilanciamento del dataset a favore del profili non STEM.
+La misura da ottimizzare ?? la Area Under Curve, AUC. 
+Il dataset contiene le seguenti variabili: 
+
+* 1 numerica (`essay_length`), 3 intere (`height`,`age`,`last_online`), 17 factors, 87 dummies
+* Il numero di livelli nelle variabili factors varia da 51 (`where_town`) a 3 (`orientation`)
+* Tra i livelli delle variabili factor troviamo dei livelli 'missing': per esempio `drinks` ha il livello `drinks_missing`
+* Pu?? succedere che un livelli di un predittore sia osservato solo nel test. 
+
+
+Dato il grande numero di variabili factors e la natura della risposta si preder?? in considerazione l'impiego di modelli che utilizzano alberi di classificazione. Le propriet?? offerte da questi algoritmi sono le seguenti:
+
+* possono gestire un gran numero di predittori
+* possono usare una variabile factor nella sua forma originaria
+* gestione dei missing values autonoma
+* selezione delle varabili intrinseca nel modello
+* considerazione autonoma delle interazione tra le variabili
+
+
+
+*Summary of the modelling process:*
+
+1. *Preprocessing* <br>
+Poich?? un buon numero di variabili factor presentava numerosi livelli anche con frequanze abbastanza ridotte, abbiamo proceduro ad accorpare alcuni livelli, superando cos?? anche il problema di livelli presenti solo nel test:
+*discretizzazione in tre livelli della variabile age
+*imputazione di 3 valori anomali dell'altezza tramite media condizionata all'etnia
+*creazione variabili etnia, cpp e lisp ragruppando tutte le loro dummy
+*riduzioni dei livelli delle variabili:education, offspring, pets, diet, smokes,religione e body_type
+*reso continua la variabile income
+
+Rimozione delle variabili a zero variance o near-zero variance e quelle che risultavano poco correlate con la risposta:
+*where_state
+*essay_lenght
+*last_online
+
+
+2. *Missing values* <br>
+Per tutte le variabili i valori misssing erano codificati come livello. Trasformando in continua la variabile income abbiamo proceduto con l'imputazione dei missing tramite regressione lineare condizionatamente a age, education e ethnicity.
+
+3. *Feature engineering* <br>
+Creazione delle seguenti variabili: 
+*propensione ai figli
+*education_modifier (diplomati, abbandonato, lavoratori e altro)
+*diet_modifier (no_diet, diet, strictly e mostly)
+*cluster, applicando l'algoritmo del k-means abbiamo creato 8 gruppi che poi sono stati accorpati opportunamente.
+*parole, variabile che considera il numero di volte in cui una parola riferita al mondo stem era presente nelle risposte agli essay. ex: engeneer, computer, computers, silincon etc..
+*score_tutte, costruita dummizzando tutto il dataset e andando a sommare tutte le probabilit?? campionarie condizionate della y rispetto alle dummy e centrate rispetto alla media delle y, cercando di non overfittare.
+*score_tutte1, variabile analoga a quella precedente considerando solo le dummy pi?? importanti.
+
+4. *Feature selection* <br>
+Intrinseca nel modello
+
+5. *Final model* <br>
+Random Forest con 500 alberi e parametro mtry=5.
+Media delle previsioni di 100 Random Forest per stabilizzare la variabilit?? della previsione.
+
+6. *Model tuning and evaluation* <br>
+Cross-Validation con K=6 che va a massimizzare l'AUC. (mtry=5)
+
+7. *R packages* <br>
+`ggplot2`
+`naniar`
+`VIM`
+`plyr`
+`dplyr`
+`caret`
+`rpart`
+`rpart.plot`
+`readr`
+
+8. *References* <br>
+none
+
+
+```{r startup, include = FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = T, eval=T, message=F, warning=F, error=F, comment=NA, cache=F, R.options=list(width=220))
+```
+
+**R code to reproduce the last submission**
+
+```{r}
+rm(list = ls())
+setwd("~/Desktop/cupid")
+library(ggplot2)
+library(naniar)
+library(VIM)
+library(plyr)
+library(dplyr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(readr)
+train <- read_csv("training.csv")
+test <- read_csv("test.csv")
+training = data.frame(train)
+
+
+to.dummy <- function(v = NULL, prefix = NULL){
+  #----[ checking the input ]----#
+  {
+    # check if user has not provided prefix argument
+    if (is.null(prefix)) {
+      stop("The input \"prefix\" is missing. This will be added to the begining of each column name to avoid conflicts with other column names.")
+    }else if (length(prefix) != 1 | nchar(prefix) == 0 | class(prefix) != "character") {
+      stop("The input \"prefix\" should be a character vector with length of 1 and character number more than 0.")
+    }
+    
+    
+    # check if user has not provided v argument
+    if (is.null(v)) {
+      stop("The input \"v\" is missing. It should be a vector with categories that you are willing to create dummy variables from. It can be a factor, character or numeric vector.")
+    }
+  }
+  
+  
+  #----[ pre-processing ]----#
+  {
+    ## convert to character vector if the input is factor
+    if (class(v) == "factor") {
+      # get the levels of v
+      v_levels <- levels(v)
+      # convert the factor to character vector
+      v <- as.character(v)
+    }else{
+      # find tha NAs and turn them into character to have a separate column for NAs
+      v[which(is.na(v))] <- "NA"
+      # get the categories
+      v_levels <- names(table(v, useNA = "ifany"))
+    }
+  }
+  
+  
+  #----[ processing ]----#
+  {
+    # go through categories one by one
+    for (i in 1:length(v_levels)) { 
+      # create a logical vector which has 1 for places that has the category
+      assign(x = paste("v", i, sep = ""), value = as.numeric(v == v_levels[i]))
+    }
+    
+    
+    # create a cbind command and run it. It attaches the variables generated in the for loop above.
+    df <- eval(parse(text = paste("cbind(",
+                                  paste('v', 1:i,
+                                        sep = '', collapse = ", "),
+                                  ")", collapse = "", sep = "")))
+    
+    # strip the white space from begining and end of the name and the middle white space with "_"
+    factor_levels <- gsub("\\s+", "_", gsub("^\\s+|\\s+$", "", v_levels))
+    # if one of the levels are "", we should create a name for it, so we use "BLANK"
+    factor_levels[which(factor_levels == "")] <- "BLANK"
+    # set the colnames
+    colnames(df) <- paste(prefix, factor_levels, sep = ".")
+    # return the final data.frame
+    return(df)
+  }
+}
+
+
+p<-which(sapply(training,class)=='character')
+training[,as.vector(p)]<-lapply(training[colnames(training)[as.vector(p)]], as.factor)
+
+
+#la nostra y ? la variabile class
+y<-training$Class
+
+ 
+combinate<-rbind(training[,-(which(colnames(training)=="Class"))],test)
+
+
+combinate[,39:ncol(combinate)]<-lapply(combinate[colnames(combinate)[39:ncol(combinate)]],as.factor)
+
+
+
+
+cpp_linguaccio<-rowSums(combinate[,as.vector(colnames(combinate)[21:24])])
+cpp_linguaccio[which(combinate$cpp==1)]<-'cpp'
+cpp_linguaccio[which(combinate$cpp_fluently==1)]<-'cpp_fluently'
+cpp_linguaccio[which(combinate$cpp_okay==1)]<-'cpp_okay'
+cpp_linguaccio[which(combinate$cpp_poorly==1)]<-'cpp_poorly'
+cpp_linguaccio<-as.factor(cpp_linguaccio)
+
+
+
+
+lisp_linguaccio<-rowSums(combinate[,as.vector(colnames(combinate)[25:28])])
+lisp_linguaccio[which(combinate$lisp==1)]<-'lisp'
+lisp_linguaccio[which(combinate$lisp_fluently==1)]<-'lisp_fluently'
+lisp_linguaccio[which(combinate$lisp_okay==1)]<-'lisp_okay'
+lisp_linguaccio[which(combinate$lisp_poorly==1)]<-'lisp_poorly'
+lisp_linguaccio<-as.factor(lisp_linguaccio)
+
+
+ethnicity<-rowSums(combinate[,as.vector(colnames(combinate)[29:37])])
+ethnicity[which(combinate$asian==1)]<-'asian'
+ethnicity[which(combinate$black==1)]<-'black'
+ethnicity[which(combinate$hispanic_latin==1)]<-'hispanic_latin'
+ethnicity[which(combinate$indian==1)]<-'indian'
+ethnicity[which(combinate$middle_eastern==1)]<-'middle_eastern'
+ethnicity[which(combinate$native_american==1)]<-'native_american'
+ethnicity[which(combinate$other==1)]<-'other'
+ethnicity[which(combinate$pacific_islander==1)]<-'pacific_islander'
+ethnicity[which(combinate$white==1)]<-'white'
+ethnicity<-as.factor(ethnicity)
+
+
+combinate2=data.frame(combinate)
+combinate2=combinate2[,-c(21:37)]
+combinate2=cbind(combinate2,ethnicity,cpp_linguaccio,lisp_linguaccio)
+
+
+score_num <- function(y,x,quantili){
+  cuts <- unique(as.numeric(quantile(x,probs=seq(0, 1, 1/quantili),na.rm=T)))
+  x.cut <- cut(x,cuts)
+  prop.table(table(x.cut,y),margin = 1)
+}
+
+
+cuts=c(17,23,25,35,46,109)
+age_cut <- cut(combinate$age,cuts)
+age_cut = as.factor(age_cut)
+combinate2$age=age_cut
+combinate2$height[(which((combinate$height<39)))]=66.5
+cuts_hei <- c(52,66,95)
+height_cut <- cut(combinate2$height,cuts_hei)
+combinate2$height=height_cut
+combinate2$last_online=NULL
+
+combinate2$essay_length=NULL
+
+combinate2$income=as.factor(combinate$income)
+reddito<-NULL
+reddito[which(combinate2$income=='inc20000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc30000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc40000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc50000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc250000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc500000')]<-'fascia_other'
+reddito[which(combinate2$income=='inc100000')]<-'fascia_stem'
+reddito[which(combinate2$income=='inc150000')]<-'fascia_stem'
+reddito[which(combinate2$income=='inc70000')]<-'fascia_stem'
+reddito[which(combinate2$income=='inc80000')]<-'fascia_stem'
+reddito[which(combinate2$income=='missing')]<-'fascia_media'
+reddito[which(combinate2$income=='inc60000')]<-'fascia_media'
+reddito[which(combinate2$income=='inc1000000')]<-'fascia_media'
+combinate2$income=as.factor(reddito)
+
+
+fumo<-NULL
+fumo[which(combinate2$smokes=='when_drinking')]<-'yes'
+fumo[which(combinate2$smokes=='trying_to_quit')]<-'yes'
+fumo[which(combinate2$smokes=='sometimes')]<-'yes'
+fumo[which(combinate2$smokes=='yes')]<-'yes'
+fumo[which(combinate2$smokes=='no')]<-'no'
+fumo[which(combinate2$smokes=='smokes_missing')]<-'smokes_missing'
+
+combinate2$smokes=as.factor(fumo)
+
+
+corpo=NULL
+corpo[which(combinate2$body_type=='a_little_extra')]<-'medio'
+corpo[which(combinate2$body_type=='athletic')]<-'medio'
+corpo[which(combinate2$body_type=='average')]<-'medio'
+corpo[which(combinate2$body_type=='bodytype_missing')]<-'medio'
+corpo[which(combinate2$body_type=='fit')]<-'medio'
+corpo[which(combinate2$body_type=='thin')]<-'medio'
+corpo[which(combinate2$body_type=='curvy')]<-'corpo_other'
+corpo[which(combinate2$body_type=='full_figured')]<-'corpo_other'
+corpo[which(combinate2$body_type=='rather_not_say')]<-'corpo_other'
+corpo[which(combinate2$body_type=='used_up')]<-'corpo_other'
+corpo[which(combinate2$body_type=='jacked')]<-'corpo_stem'
+corpo[which(combinate2$body_type=='overweight')]<-'corpo_stem'
+corpo[which(combinate2$body_type=='skinny')]<-'corpo_stem'
+
+combinate2$body_type=as.factor(corpo)
+
+
+
+
+
+
+#creiamo diet modifier
+diet_modifier=NULL
+diet_modifier[which(combinate2$diet=='anything')]<-'no_diet'
+diet_modifier[which(combinate2$diet=='diet_missing')]<-'no_diet'
+diet_modifier[which(combinate2$diet=='other')]<-'no_diet'
+diet_modifier[which(combinate2$diet=='vegan')]<-'diet'
+diet_modifier[which(combinate2$diet=='vegetarian')]<-'diet'
+diet_modifier[which(combinate2$diet=='kosher')]<-'diet'
+diet_modifier[which(combinate2$diet=='halal')]<-'diet'
+diet_modifier[which(combinate2$diet=='mostly_vegetarian')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='mostly_other')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='mostly_anything')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='mostly_vegan')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='mostly_halal')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='mostly_kosher')]<-'mostly_diet'
+diet_modifier[which(combinate2$diet=='strictly_vegan')]<-'strictly_diet'
+diet_modifier[which(combinate2$diet=='strictly_vegetarian')]<-'strictly_diet'
+diet_modifier[which(combinate2$diet=='strictly_kosher')]<-'strictly_diet'
+diet_modifier[which(combinate2$diet=='strictly_halal')]<-'strictly_diet'
+diet_modifier[which(combinate2$diet=='strictly_anything')]<-'strictly_diet'
+diet_modifier[which(combinate2$diet=='strictly_other')]<-'strictly_diet'
+combinate2$diet_modifier=as.factor(diet_modifier)
+
+
+diet=combinate2$diet
+diet <- gsub('mostly_halal', 'halal', diet)
+diet <- gsub('strictly_halal', 'halal', diet)
+diet <- gsub('mostly_kosher', 'kosher', diet)
+diet <- gsub('strictly_kosher', 'kosher', diet)
+diet <- gsub('strictly_anything', 'anything', diet)
+diet <- gsub('mostly_anything', 'anything', diet)
+diet <- gsub('mostly_vegan', 'vegan', diet)
+diet <- gsub('strictly_vegan', 'vegan', diet)
+diet <- gsub('strictly_vegetarian', 'vegetarian', diet)
+diet <- gsub('mostly_vegetarian', 'vegetarian', diet)
+diet <- gsub('mostly_other', 'other', diet)
+diet <- gsub('strictly_other', 'other', diet)
+combinate2$diet=as.factor(diet)
+
+
+
+combinate2$where_state=NULL
+
+
+
+
+name_city_stem<-c('mountain_view','palo_alto','pinole','menlo_park','san_carlos','san_mateo',
+                  'burlingame','corte_madera','fairfax','orinda','redwood_city','san_bruno',
+                  'lafayette','alameda')
+
+name_city_other<-c('belvedere_tiburon','half_moon_bay','moraga','san_rafael','mill_valley','sausalito',
+                   'san_anselmo','martinez','millbrae','pacifica','san_leandro',
+                   'south_san_francisco','pleasant_hill','el_sobrante','fremont','san_pablo','vallejo','oakland',
+                   'daly_city','richmond','el_cerrito','hercules','castro_valley','novato','walnut_creek','benicia','green_brae',
+                   'larkspur','berkeley')
+
+city_dummy<-vector()
+for (i in 1:10000) {
+  for (s in 1:length(name_city_other)){
+    if (combinate2$where_town[i]==name_city_other[s]) {city_dummy[i]<-1}else{city_dummy[i]<-0}
+  }  
+}
+
+city_dummy_stem<-vector()
+for (i in 1:10000) {
+  for (s in 1:length(name_city_stem)){
+    if (combinate2$where_town[i]==name_city_stem[s]) {city_dummy_stem[i]<-1}else{city_dummy_stem[i]<-0}
+  }  
+}
+
+
+
+
+animali=NULL
+animali[which(combinate2$pets=='dislikes_cats')]<-'dislike_animal'
+animali[which(combinate2$pets=='dislikes_dogs')]<-'dislike_animal'
+animali[which(combinate2$pets=='dislikes_dogs_and_dislikes_cats')]<-'dislike_animal'
+animali[which(combinate2$pets=='pets_missing')]<-'media_animal'
+animali[which(combinate2$pets=='likes_dogs_and_likes_cats')]<-'media_animal'
+animali[which(combinate2$pets=='likes_dogs_and_has_cats')]<-'media_animal'
+animali[which(combinate2$pets=='likes_dogs_and_dislikes_cats')]<-'media_animal'
+animali[which(combinate2$pets=='has_cats')]<-'media_animal'
+animali[which(combinate2$pets=='likes_dogs')]<-'media_animal'
+animali[which(combinate2$pets=='dislikes_dogs_and_likes_cats')]<-'like_cats'
+animali[which(combinate2$pets=='likes_cats')]<-'like_cats'
+animali[which(combinate2$pets=='has_dogs_and_dislikes_cats')]<-'other_animal'
+animali[which(combinate2$pets=='has_dogs_and_has_cats')]<-'other_animal'
+animali[which(combinate2$pets=='has_dogs_and_likes_cats')]<-'other_animal'
+animali[which(combinate2$pets=='has_dogs')]<-'other_animal'
+animali[which(combinate2$pets=='dislikes_dogs_and_has_cats')]<-'other_animal'
+
+
+combinate2$pets=as.factor(animali)
+
+
+
+
+education_modifier=NULL
+education_modifier[which(combinate2$education=='dropped_out_of_college_university')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_high_school')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_law_school')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_masters_program')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_med_school')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_ph_d_program')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_space_camp')]<-'dropped'
+education_modifier[which(combinate2$education=='dropped_out_of_two_year_college')]<-'dropped'
+
+education_modifier[which(combinate2$education=='graduated_from_college_university')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_high_school')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_law_school')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_masters_program')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_med_school')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_ph_d_program')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_space_camp')]<-'graduated'
+education_modifier[which(combinate2$education=='graduated_from_two_year_college')]<-'graduated'
+
+education_modifier[which(combinate2$education=='working_on_college_university')]<-'working'
+education_modifier[which(combinate2$education=='working_on_high_school')]<-'working'
+education_modifier[which(combinate2$education=='working_on_law_school')]<-'working'
+education_modifier[which(combinate2$education=='working_on_masters_program')]<-'working'
+education_modifier[which(combinate2$education=='working_on_med_school')]<-'working'
+education_modifier[which(combinate2$education=='working_on_ph_d_program')]<-'working'
+education_modifier[which(combinate2$education=='working_on_space_camp')]<-'working'
+education_modifier[which(combinate2$education=='working_on_two_year_college')]<-'working'
+
+education_modifier[which(combinate2$education=='college_university')]<-'altro'
+education_modifier[which(combinate2$education=='ed_missing')]<-'altro'
+education_modifier[which(combinate2$education=='high_school')]<-'altro'
+education_modifier[which(combinate2$education=='masters_program')]<-'altro'
+education_modifier[which(combinate2$education=='med_school')]<-'altro'
+education_modifier[which(combinate2$education=='ph_d_program')]<-'altro'
+education_modifier[which(combinate2$education=='space_camp')]<-'altro'
+education_modifier[which(combinate2$education=='two_year_college')]<-'altro'
+education_modifier[which(combinate2$education=='law_school')]<-'altro'
+
+combinate2$education_modifier=as.factor(education_modifier)
+
+istruzione=NULL
+istruzione[which(combinate2$education=='dropped_out_of_med_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='dropped_out_of_high_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='graduated_from_high_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='graduated_from_med_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='working_on_med_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='working_on_high_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='high_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='med_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='dropped_out_of_law_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='graduated_from_law_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='working_on_law_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='law_school')]<-'high_med_law'
+istruzione[which(combinate2$education=='dropped_out_of_ph_d_program')]<-'phd'
+istruzione[which(combinate2$education=='graduated_from_ph_d_program')]<-'phd'
+istruzione[which(combinate2$education=='ph_d_program')]<-'phd'
+istruzione[which(combinate2$education=='working_on_ph_d_program')]<-'phd'
+istruzione[which(combinate2$education=='dropped_out_of_masters_program')]<-'master'
+istruzione[which(combinate2$education=='graduated_from_masters_program')]<-'master'
+istruzione[which(combinate2$education=='masters_program')]<-'master'
+istruzione[which(combinate2$education=='working_on_masters_program')]<-'working_master_college_university'
+istruzione[which(combinate2$education=='working_on_college_university')]<-'working_master_college_university'
+istruzione[which(combinate2$education=='dropped_out_of_space_camp')]<-'space_camp'
+istruzione[which(combinate2$education=='space_camp')]<-'space_camp'
+istruzione[which(combinate2$education=='working_on_space_camp')]<-'space_camp'
+istruzione[which(combinate2$education=='graduated_from_space_camp')]<-'space_camp'
+istruzione[which(combinate2$education=='college_university')]<-'college_university'
+istruzione[which(combinate2$education=='dropped_out_of_college_university')]<-'college_university'
+istruzione[which(combinate2$education=='graduated_from_college_university')]<-'college_university'
+istruzione[which(combinate2$education=='dropped_out_of_two_year_college')]<-'two_years_college'
+istruzione[which(combinate2$education=='graduated_from_two_year_college')]<-'two_years_college'
+istruzione[which(combinate2$education=='two_year_college')]<-'two_years_college'
+istruzione[which(combinate2$education=='working_on_two_year_college')]<-'two_years_college'
+istruzione[which(combinate2$education=='ed_missing')]<-'ed_missing'
+
+
+combinate2$education=as.factor(istruzione)
+
+
+
+propensione_figli=NULL
+propensione_figli[which(combinate2$offspring=='doesnt_have_kids_and_doesnt_want_any')]<-'doesnt_want_kids'
+propensione_figli[which(combinate2$offspring=='has_a_kid_but_doesnt_want_more')]<-'doesnt_want_kids'
+propensione_figli[which(combinate2$offspring=='has_kids_but_doesnt_want_more')]<-'doesnt_want_kids'
+propensione_figli[which(combinate2$offspring=='doesnt_want_kids')]<-'doesnt_want_kids'
+
+propensione_figli[which(combinate2$offspring=='doesnt_have_kids_but_might_want_them')]<-'might_want_kids'
+propensione_figli[which(combinate2$offspring=='has_a_kid_and_might_want_more')]<-'might_want_kids'
+propensione_figli[which(combinate2$offspring=='has_kids_and_might_want_more')]<-'might_want_kids'
+propensione_figli[which(combinate2$offspring=='might_want_kids')]<-'might_want_kids'
+
+propensione_figli[which(combinate2$offspring=='doesnt_have_kids_but_wants_them')]<-'wants_kids'
+propensione_figli[which(combinate2$offspring=='has_a_kid_and_wants_more')]<-'wants_kids'
+propensione_figli[which(combinate2$offspring=='has_kids_and_wants_more')]<-'wants_kids'
+propensione_figli[which(combinate2$offspring=='wants_kids')]<-'wants_kids'
+
+propensione_figli[which(combinate2$offspring=='doesnt_have_kids')]<-'propensione_missing'
+propensione_figli[which(combinate2$offspring=='kids_missing')]<-'propensione_missing'
+propensione_figli[which(combinate2$offspring=='has_a_kid')]<-'propensione_missing'
+propensione_figli[which(combinate2$offspring=='has_kids')]<-'propensione_missing'
+
+
+combinate2$propensione_figli=as.factor(propensione_figli)
+
+
+figli=NULL
+figli[which(combinate2$offspring=='doesnt_have_kids')]<-'no_kids'
+figli[which(combinate2$offspring=='doesnt_have_kids_and_doesnt_want_any')]<-'no_kids'
+figli[which(combinate2$offspring=='doesnt_have_kids_but_might_want_them')]<-'no_kids'
+figli[which(combinate2$offspring=='doesnt_have_kids_but_wants_them')]<-'no_kids'
+figli[which(combinate2$offspring=='doesnt_want_kids')]<-'no_kids'
+figli[which(combinate2$offspring=='might_want_kids')]<-'no_kids'
+figli[which(combinate2$offspring=='wants_kids')]<-'no_kids'
+
+figli[which(combinate2$offspring=='has_a_kid')]<-'kid'
+figli[which(combinate2$offspring=='has_a_kid_and_might_want_more')]<-'kid'
+figli[which(combinate2$offspring=='has_a_kid_and_wants_more')]<-'kid'
+figli[which(combinate2$offspring=='has_a_kid_but_doesnt_want_more')]<-'kid'
+
+figli[which(combinate2$offspring=='has_kids')]<-'kidss'
+figli[which(combinate2$offspring=='has_kids_and_might_want_more')]<-'kidss'
+figli[which(combinate2$offspring=='has_kids_and_wants_more')]<-'kidss'
+figli[which(combinate2$offspring=='has_kids_but_doesnt_want_more')]<-'kidss'
+
+figli[which(combinate2$offspring=='kids_missing')]<-'kids_missing'
+
+
+combinate2$offspring=as.factor(figli)
+
+
+religione=NULL
+religione[which(combinate2$religion=='agnosticism')]<-'rel_stem'
+religione[which(combinate2$religion=='atheism')]<-'rel_stem'
+religione[which(combinate2$religion=='hinduism')]<-'rel_stem'
+religione[which(combinate2$religion=='judaism')]<-'rel_medio'
+religione[which(combinate2$religion=='islam')]<-'rel_medio'
+religione[which(combinate2$religion=='religion_missing')]<-'rel_medio'
+religione[which(combinate2$religion=='buddhism')]<-'rel_other'
+religione[which(combinate2$religion=='catholicism')]<-'rel_other'
+religione[which(combinate2$religion=='christianity')]<-'rel_other'
+religione[which(combinate2$religion=='other')]<-'rel_other'
+combinate2$religion=as.factor(religione)
+
+
+segno_missing=NULL
+segno_missing=ifelse(combinate2$sign=='sign_missing',1,0)
+combinate2$sign=as.factor(segno_missing)
+
+
+
+
+
+mydata<-sapply(combinate2,as.numeric)
+mydata <- scale(mydata) # standardize variables
+
+
+set.seed(123)
+fit <- kmeans(mydata, 8) 
+
+mydata1 <- data.frame( fit$cluster[1:6000],y)
+
+
+cluster=c()
+
+cluster[which(fit$cluster==2)]<-2
+cluster[which(fit$cluster==6)]<-2
+cluster[which(fit$cluster==4)]<-2
+cluster[which(fit$cluster==8)]<-2
+cluster[which(fit$cluster==1)]<-1
+cluster[which(fit$cluster==3)]<-1
+cluster[which(fit$cluster==5)]<-1
+cluster[which(fit$cluster==7)]<-3
+
+cluster<-as.factor(cluster)
+
+combinate2$where_town=NULL
+data_model<-cbind(combinate2,cluster)
+dummy_variable<-as.data.frame(lapply((c(1:17,88:94)),function(x) to.dummy(data_model[x],colnames(data_model)[x])))
+
+data_model[,c(1:17,88:94)]<-NULL
+dummy_dataset<-cbind(dummy_variable,data_model)
+for (i in c(108:ncol(dummy_dataset))){
+  dummy_dataset[,i]=as.numeric(dummy_dataset[,i])-rep(1,10000)
+}
+
+dummy_dataset_y<-cbind(y,dummy_dataset[1:6000,])
+
+tab_y <- table((y))
+mediay=round(as.numeric(tab_y[2]/length(y)),3)
+
+dataset_score=dummy_dataset
+dummy_coding=function(colonna) {
+  a=which(dummy_dataset[1:6000,colonna]==1)
+  tab <- table((y[a]))
+  uno=round(as.numeric(tab['stem']/length(a)),3)
+  a1=which(dummy_dataset[1:6000,colonna]==0)
+  tab1 <- table((y[a1]))
+  due=round(as.numeric(tab1['stem']/length(a1)),3)
+  dataset_score[,colonna]<<-ifelse(dummy_dataset[,colonna]==1,uno-mediay,due-mediay)
+}
+
+bottiglia=sapply(1:ncol(dataset_score), dummy_coding)
+
+for (i in 1:ncol(dataset_score)){
+  a=which(is.na(dataset_score[,i]))
+  dataset_score[a,i]=0
+}
+
+score_tutte=apply(dataset_score, 1, sum)
+numerosita_col=apply(dummy_dataset, 2 ,sum)
+numerosita_row=apply(dummy_dataset, 1 ,sum)
+dummy_dataset1=dummy_dataset[,-numerosita_col]
+dummy_dataset2=dummy_dataset1
+for (i in 1:(ncol(dummy_dataset1)-1)){
+  for (j in (i+1):ncol(dummy_dataset1)) {
+    a=dummy_dataset1[,i]*dummy_dataset1[,j]
+    dummy_dataset2=cbind(dummy_dataset2,a)
+    colnames(dummy_dataset2)[length(dummy_dataset2)]=paste(colnames(dummy_dataset2)[i],colnames(dummy_dataset2)[j],sep = '_')
+  }
+}
+a=apply(dummy_dataset2, 2, sum)
+dummy_dataset2=cbind(dummy_dataset2,dummy_dataset[,(which(numerosita_col<50))])
+tab_y <- table((y))
+mediay=round(as.numeric(tab_y[2]/length(y)),3)
+dataset_score1=dummy_dataset2
+dummy_coding=function(colonna) {
+  a=which(dummy_dataset2[1:6000,colonna]==1)
+  tab <- table((y[a]))
+  uno=round(as.numeric(tab['stem']/length(a)),3)
+  a1=which(dummy_dataset2[1:6000,colonna]==0)
+  tab1 <- table((y[a1]))
+  due=round(as.numeric(tab1['stem']/length(a1)),3)
+  dataset_score1[,colonna]<<-ifelse(dummy_dataset2[,colonna]==1,uno-mediay,due-mediay)
+}
+
+bottiglia=sapply(1:ncol(dataset_score1), dummy_coding)
+
+for (i in 1:ncol(dataset_score1)){
+  a=which(is.na(dataset_score1[,i]))
+  dataset_score1[a,i]=0
+}
+score_tutte1=apply(dataset_score1, 1, sum)
+linguaggi_programmazione=c(21:28)
+nerdoso=c(c(61,62,79))
+tech1=c(91,89,97,85,69,59)
+altro=c(50,51,54,50,53,54)
+linguaggi_programmazione=apply(combinate[,linguaggi_programmazione],1,function(x) sum(x,na.rm = T))
+nerdoso=apply(combinate[,nerdoso],1,function(x) sum(as.numeric(x),na.rm = T))
+tech1=apply(combinate[,tech1],1,function(x) sum(as.numeric(x),na.rm = T))
+altro=apply(combinate[,altro],1,function(x) sum(as.numeric(x),na.rm = T))
+somma_parole_rilevanti=linguaggi_programmazione+nerdoso+tech1+altro
+parole=as.data.frame(cbind(linguaggi_programmazione,nerdoso,tech1,altro,somma_parole_rilevanti))
+income1=combinate$income
+##### imputazione missing income #####
+levels(combinate$income)<-c(100000,1000000,150000,20000,250000,30000,40000,50000,500000,60000,70000,80000,NA)
+combinate$income<-as.numeric(levels(combinate$income))[combinate$income]
+comninate2_inc<-combinate2
+comninate2_inc$income<-combinate$income
+posincn<-which(is.na(comninate2_inc$income))
+incom_no_miss<-comninate2_inc[-posincn,]
+incomprev<-lm(income ~-1+ age+ethnicity+education,incom_no_miss)
+previsioneincome<-predict(incomprev,newdata = comninate2_inc[posincn,])
+comninate2_inc$income[posincn]<-previsioneincome
+income_no_missing=comninate2_inc$income
+previsione=c()
+set.seed(2)
+for (i in 1:100) {
+library(randomForest)
+DATASET_finale=as.data.frame(cbind(score_tutte,combinate2,cluster,parole,score_tutte1,income_no_missing,city_dummy,city_dummy_stem))
+DATASET_Y=cbind(y,as.data.frame(DATASET_finale[1:6000,]))
+train_up = upSample(x = DATASET_finale[1:6000,], y=y, yname="stem")
+fit.rf <- randomForest(stem ~ ., data = train_up, ntree = 500, importance=F,mtry=5)
+phat = predict(fit.rf, newdata=DATASET_finale[6001:nrow(DATASET_finale),],type = 'prob')[,'stem',drop=F]
+previsione=cbind(previsione,phat)}
+previsione_media=apply(previsione, 1, function(x) mean(x,trim = 0.20))
+write.table(file='previsione_finale1.txt',previsione_media , row.names = FALSE, col.names = FALSE)
+head(previsione_media)
+```
+
